@@ -1,0 +1,68 @@
+import numpy as np
+from astropy.io import fits
+from astropy import units as u
+from astropy.wcs import WCS
+from radio_beam import Beam
+from astropy.convolution import convolve
+from reproject import reproject_interp
+
+# Load FITS files
+vlass_file = r"D:\X\file_name1.fits"
+lotss_file = r"D:\X\file_name2.fits"
+
+vlass_data = fits.getdata(vlass_file)
+vlass_header = fits.getheader(vlass_file)
+vlass_wcs = WCS(vlass_header, naxis=2)
+
+lotss_data = fits.getdata(lotss_file)
+lotss_header = fits.getheader(lotss_file)
+lotss_wcs = WCS(lotss_header, naxis=2)
+
+# Handle extra dimensions
+if vlass_data.ndim > 2:
+    vlass_data = vlass_data[0, 0]
+
+if lotss_data.ndim > 2:
+    lotss_data = lotss_data[0]
+
+# Reproject LoTSS to VLASS grid
+lotss_reprojected, _ = reproject_interp((lotss_data, lotss_wcs), vlass_wcs, vlass_data.shape)
+
+# Set beam information
+vlass_beam = Beam(major=2.5*u.arcsec, minor=2.5*u.arcsec, pa=0*u.deg)
+lotss_beam = Beam(major=5*u.arcsec, minor=5*u.arcsec, pa=0*u.deg)
+
+# Convolve to common resolution
+target_beam = max(vlass_beam, lotss_beam)
+
+def convolve_if_needed(data, original_beam, target_beam, pixel_scale):
+    if target_beam > original_beam:
+        kernel = target_beam.deconvolve(original_beam).as_kernel(pixel_scale)
+        return convolve(data, kernel)
+    return data
+
+vlass_pixel_scale = abs(vlass_header['CDELT2']) * u.deg
+
+vlass_conv = convolve_if_needed(vlass_data, vlass_beam, target_beam, vlass_pixel_scale)
+lotss_conv = convolve_if_needed(lotss_reprojected, lotss_beam, target_beam, vlass_pixel_scale)
+
+# Apply noise threshold
+vlass_threshold = 0.00021
+lotss_threshold = 0.00024
+
+vlass_conv[vlass_conv < vlass_threshold] = 0
+lotss_conv[lotss_conv < lotss_threshold] = 0
+
+# Calculate spectral index
+vlass_freq = 3000  # MHz
+lotss_freq = 144  # MHz
+
+with np.errstate(divide='ignore', invalid='ignore'):
+    spectral_index = np.log(vlass_conv / lotss_conv) / np.log(vlass_freq / lotss_freq)
+    spectral_index[np.isnan(spectral_index)] = 0
+
+# Create a new FITS file
+hdu = fits.PrimaryHDU(spectral_index, header=vlass_header)
+hdu.writeto('spectral_index.fits', overwrite=True)
+
+print("Spectral index FITS file created: spectral_index.fits")
